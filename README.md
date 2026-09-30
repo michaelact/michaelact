@@ -33,6 +33,8 @@ I build and run the platform that product teams ship on: Kubernetes clusters, CI
   <img alt="When I work: weekday by hour heatmap" src="https://raw.githubusercontent.com/michaelact/michaelact/main/assets/ai/rhythm-light.svg">
 </picture>
 
+<sub>Generated locally with [cli-agent-stats](https://github.com/michaelact/cli-agent-stats).</sub>
+
 ## GitHub
 
 <picture>
