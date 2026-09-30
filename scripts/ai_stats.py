@@ -9,6 +9,7 @@ Usage: python3 scripts/ai_stats.py
 import copy
 import html
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
@@ -106,11 +107,9 @@ def collect(claude_dir):
 
     aliases = skill_aliases(claude_dir, {project for _, project, _ in history if project})
     for d in days.values():
-        # the model calls Skill with bare or full names; count both under the full name
-        resolved = Counter()
-        for name, n in d["skills"].items():
-            resolved[aliases.setdefault(name, name)] += n
-        d["skills"] = resolved
+        # ledger keeps raw Skill names; bare/full aliases are merged at render time
+        for name in d["skills"]:
+            aliases.setdefault(name, name)
     for text, _, day in history:
         # only days with transcripts: a typed command alone must not create an "active" day
         if not text.startswith("/") or day not in days:
@@ -178,7 +177,7 @@ def longest_streak(dates):
     return best
 
 
-def summarize(ledger, scrub):
+def summarize(ledger, scrub, aliases=None):
     """Card numbers over the 90 days ending at the last ledger date."""
     dates = sorted(ledger)
     first, last = date.fromisoformat(dates[0]), date.fromisoformat(dates[-1])
@@ -196,8 +195,11 @@ def summarize(ledger, scrub):
         for hour, n in entry.get("hours", {}).items():
             heat[weekday][int(hour)] += n
 
-    plugins = Counter()
+    skills = Counter()
     for raw, n in totals["skills"].items():
+        skills[(aliases or {}).get(raw, raw)] += n
+    plugins = Counter()
+    for raw, n in skills.items():
         if ":" in raw:
             plugins[raw.split(":", 1)[0]] += n
     for raw, n in totals["mcp"].items():
@@ -220,7 +222,7 @@ def summarize(ledger, scrub):
         "sessions_per_day": sessions / len(window),
         "models": public_shares(totals["models"]),
         "mcp": public_shares(totals["mcp"]),
-        "skills": public_shares(totals["skills"], short=True),  # plugin shown in its own group
+        "skills": public_shares(skills, short=True),  # plugin shown in its own group
         "plugins": public_shares(plugins),
         "tools": public_shares(totals["tools"]),
         "heat": heat,
@@ -328,9 +330,11 @@ def main(repo, home):
         print("no Claude Code data found", file=sys.stderr)
         return 1
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(json.dumps(ledger, indent=1, sort_keys=True), encoding="utf-8")
+    tmp = ledger_path.with_name(ledger_path.name + ".tmp")  # the ledger is the only copy of old history
+    tmp.write_text(json.dumps(ledger, indent=1, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, ledger_path)
 
-    s = summarize(ledger, scrub)
+    s = summarize(ledger, scrub, skill_aliases(home / ".claude", set()))
     out = repo / "assets/ai"
     out.mkdir(parents=True, exist_ok=True)
     written = []
@@ -340,7 +344,11 @@ def main(repo, home):
             path.write_text(render(s, theme), encoding="utf-8")
             written.append(path)
 
-    hits = guard(written + [repo / "README.md"], scrub.get("deny", []))
+    deny = scrub.get("deny", [])
+    hits = guard(written + [repo / "README.md"], deny)
+    # names are clipped and XML-escaped in the SVGs, so also check them before rendering
+    for key in ("models", "mcp", "skills", "plugins", "tools"):
+        hits += [(Path(f"<{key}: {name}>"), t) for name, _ in s[key] for t in deny if t.lower() in name.lower()]
     print(f"ledger  {s['first']} .. {s['last']} ({len(ledger)} days), skipped lines: {skipped}")
     for key in ("mcp", "skills", "plugins", "tools", "models"):
         print(f"{key:8}" + ", ".join(f"{name} {pct:.0f}%" for name, pct in s[key][:3]))

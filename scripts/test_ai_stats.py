@@ -2,6 +2,7 @@ import json
 from collections import Counter
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -74,15 +75,32 @@ class CollectTest(unittest.TestCase):
             "sessions": 1, "tools": {}, "mcp": {}, "skills": {}, "models": {}, "hours": {"23": 1},
         })
 
-    def test_bare_skill_call_maps_to_plugin_skill(self):
+    def install_caveman(self):
         skill = self.claude / "plugins/cache/mkt/caveman/1.0.0/skills/caveman/SKILL.md"
-        skill.parent.mkdir(parents=True)
+        skill.parent.mkdir(parents=True, exist_ok=True)
         skill.write_text("---\nname: caveman\n---\n")
+        return skill
+
+    def test_bare_skill_call_counts_under_plugin_at_render(self):
+        self.install_caveman()
         write_jsonl(self.claude / "projects/p/s.jsonl", [
             assistant("2026-09-29T20:01:00Z", "s", [("Skill", {"skill": "caveman"}), ("Skill", {"skill": "caveman:caveman"})]),
         ])
         days, _ = ai_stats.collect(self.claude)
-        self.assertEqual(days["2026-09-30"]["skills"], {"caveman:caveman": 2})
+        self.assertEqual(days["2026-09-30"]["skills"], {"caveman": 1, "caveman:caveman": 1})  # raw in ledger
+        s = ai_stats.summarize(days, {}, ai_stats.skill_aliases(self.claude, set()))
+        self.assertEqual(s["skills"], [("caveman", 100.0)])
+        self.assertEqual(s["plugins"], [("caveman", 100.0)])
+
+    def test_alias_change_between_runs_does_not_double_count(self):
+        skill = self.install_caveman()
+        write_jsonl(self.claude / "projects/p/s.jsonl", [
+            assistant("2026-09-29T20:01:00Z", "s", [("Skill", {"skill": "caveman"}), ("Skill", {"skill": "other"})]),
+        ])
+        ledger = ai_stats.merge({}, ai_stats.collect(self.claude)[0])
+        skill.unlink()  # plugin uninstalled before the next sync
+        ledger = ai_stats.merge(ledger, ai_stats.collect(self.claude)[0])
+        self.assertEqual(ledger["2026-09-30"]["skills"], {"caveman": 1, "other": 1})
 
     def test_collect_without_history_file(self):
         write_jsonl(self.claude / "projects/p/s.jsonl", [assistant("2026-09-29T20:01:00Z", "s")])
@@ -222,6 +240,30 @@ class MainTest(unittest.TestCase):
     def test_deny_hit_fails(self):
         self.write_scrub(deny=["acme"])
         self.assertEqual(ai_stats.main(self.repo, self.home), 1)
+
+    def test_deny_term_cut_by_clip_still_fails(self):
+        write_jsonl(self.home / ".claude/projects/p/s1.jsonl", [
+            assistant("2026-09-29T20:01:00Z", "s1", [("mcp__aaaaaaaaaaaaaaaaaaaa-acme__q", {})]),
+        ])
+        self.write_scrub(deny=["acme"])
+        self.assertEqual(ai_stats.main(self.repo, self.home), 1)
+
+    def test_failed_ledger_write_keeps_old_ledger(self):
+        self.write_scrub()
+        ledger = self.home / ".local/share/ai-stats/ledger.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text('{"2026-01-01": {"sessions": 1}}')
+        real = Path.write_text
+
+        def disk_full(path, data, *args, **kwargs):
+            if path.name.startswith("ledger"):
+                real(path, data[:10], *args, **kwargs)
+                raise OSError("disk full")
+            return real(path, data, *args, **kwargs)
+
+        with mock.patch.object(Path, "write_text", disk_full), self.assertRaises(OSError):
+            ai_stats.main(self.repo, self.home)
+        self.assertEqual(json.loads(ledger.read_text()), {"2026-01-01": {"sessions": 1}})
 
     def test_missing_scrub_config_fails_before_writing(self):
         self.assertEqual(ai_stats.main(self.repo, self.home), 1)
