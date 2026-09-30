@@ -218,6 +218,7 @@ def summarize(ledger, scrub, aliases=None):
         "first": dates[0],
         "last": dates[-1],
         "active_pct": 100 * len(window) / span,
+        "window_days": span,
         "streak": longest_streak(dates),
         "sessions_per_day": sessions / len(window),
         "models": public_shares(totals["models"]),
@@ -262,14 +263,14 @@ def render_overview(s, theme):
     for i, (label, value) in enumerate(tiles):
         x = 24 + i * 190
         body += [text(x, 80, label, c["muted"], 12), text(x, 114, value, c["accent"], 26, 700)]
-    body.append(text(24, 150, f"last 90 days · since {s['first'][:7]} · synced {s['last']}", c["muted"], 12))
+    body.append(text(24, 150, f"last {s['window_days']} days · since {s['first'][:7]} · synced {s['last']}", c["muted"], 12))
     return svg(800, 170, theme, body)
 
 
 def render_toolbox(s, theme):
     c = THEMES[theme]
     groups = [("MCP servers", s["mcp"]), ("Skills", s["skills"]), ("Plugins", s["plugins"]), ("Tool mix", s["tools"])]
-    body = [text(24, 36, "Toolbox · share of calls, last 90 days", c["title"], 18, 600)]
+    body = [text(24, 36, f"Toolbox · share of calls, last {s['window_days']} days", c["title"], 18, 600)]
     for i, (title, rows) in enumerate(groups):
         x, y = 24 + (i % 2) * 388, 72 + (i // 2) * 190
         body.append(text(x, y, title, c["title"], 14, 600))
@@ -289,7 +290,7 @@ def render_toolbox(s, theme):
 def render_rhythm(s, theme):
     c = THEMES[theme]
     top = max(max(row) for row in s["heat"]) or 1
-    body = [text(24, 36, "When I work · Asia/Jakarta, last 90 days", c["title"], 18, 600)]
+    body = [text(24, 36, f"When I work · Asia/Jakarta, last {s['window_days']} days", c["title"], 18, 600)]
     for d, row in enumerate(s["heat"]):
         y = 56 + d * 22
         body.append(text(24, y + 13, DAYS[d], c["muted"], 11))

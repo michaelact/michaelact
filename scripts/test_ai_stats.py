@@ -190,6 +190,14 @@ class SummaryTest(unittest.TestCase):
         s = ai_stats.summarize({"2026-09-21": day(), "2026-09-30": day()}, {})
         self.assertAlmostEqual(s["active_pct"], 20.0)  # 2 active of 10 days, not of 90
 
+    def test_cards_name_the_real_window(self):
+        s = ai_stats.summarize({"2026-09-21": day(), "2026-09-30": day()}, {})
+        self.assertEqual(s["window_days"], 10)
+        for render in ai_stats.CARDS.values():
+            card = render(s, "dark")
+            self.assertIn("last 10 days", card)
+            self.assertNotIn("90 days", card)
+
 
 class RenderTest(unittest.TestCase):
     def test_clip(self):
