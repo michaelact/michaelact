@@ -74,6 +74,16 @@ class CollectTest(unittest.TestCase):
             "sessions": 1, "tools": {}, "mcp": {}, "skills": {}, "models": {}, "hours": {"23": 1},
         })
 
+    def test_bare_skill_call_maps_to_plugin_skill(self):
+        skill = self.claude / "plugins/cache/mkt/caveman/1.0.0/skills/caveman/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: caveman\n---\n")
+        write_jsonl(self.claude / "projects/p/s.jsonl", [
+            assistant("2026-09-29T20:01:00Z", "s", [("Skill", {"skill": "caveman"}), ("Skill", {"skill": "caveman:caveman"})]),
+        ])
+        days, _ = ai_stats.collect(self.claude)
+        self.assertEqual(days["2026-09-30"]["skills"], {"caveman:caveman": 2})
+
     def test_collect_without_history_file(self):
         write_jsonl(self.claude / "projects/p/s.jsonl", [assistant("2026-09-29T20:01:00Z", "s")])
         days, skipped = ai_stats.collect(self.claude)
@@ -151,6 +161,12 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(s["models"][0], ("claude-opus-5-5", 75.0))
         self.assertEqual(sum(map(sum, s["heat"])), 4)  # 2026-01-01 is outside the window
         self.assertEqual(s["heat"][date(2026, 9, 30).weekday()][9], 4)
+
+    def test_skills_show_skill_name_without_plugin(self):
+        ledger = {"2026-09-30": day(skills={"superpowers:brainstorming": 2, "acme-x:acme-deploy": 1})}
+        s = ai_stats.summarize(ledger, {"strip_prefixes": ["acme-"]})
+        self.assertEqual(s["skills"], [("brainstorming", 100 * 2 / 3), ("deploy", 100 / 3)])
+        self.assertEqual({n for n, _ in s["plugins"]}, {"superpowers", "x"})
 
     def test_short_history_denominator(self):
         s = ai_stats.summarize({"2026-09-21": day(), "2026-09-30": day()}, {})

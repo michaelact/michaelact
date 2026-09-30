@@ -106,8 +106,11 @@ def collect(claude_dir):
 
     aliases = skill_aliases(claude_dir, {project for _, project, _ in history if project})
     for d in days.values():
-        for name in d["skills"]:
-            aliases.setdefault(name, name)
+        # the model calls Skill with bare or full names; count both under the full name
+        resolved = Counter()
+        for name, n in d["skills"].items():
+            resolved[aliases.setdefault(name, name)] += n
+        d["skills"] = resolved
     for text, _, day in history:
         # only days with transcripts: a typed command alone must not create an "active" day
         if not text.startswith("/") or day not in days:
@@ -201,10 +204,11 @@ def summarize(ledger, scrub):
         if raw.startswith("plugin_"):
             plugins[raw.split("_", 2)[1]] += n
 
-    def public_shares(counter):
+    def public_shares(counter, short=False):
         out = Counter()
         for raw, n in counter.items():
-            out[public_name(raw, scrub)] += n
+            name = public_name(raw, scrub)
+            out[name.split(":")[-1] if short else name] += n
         return shares(out)
 
     span = min(WINDOW_DAYS, (last - first).days + 1)
@@ -216,7 +220,7 @@ def summarize(ledger, scrub):
         "sessions_per_day": sessions / len(window),
         "models": public_shares(totals["models"]),
         "mcp": public_shares(totals["mcp"]),
-        "skills": public_shares(totals["skills"]),
+        "skills": public_shares(totals["skills"], short=True),  # plugin shown in its own group
         "plugins": public_shares(plugins),
         "tools": public_shares(totals["tools"]),
         "heat": heat,
