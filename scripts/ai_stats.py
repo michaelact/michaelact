@@ -7,7 +7,9 @@ and writes scrubbed SVG cards to assets/ai/. No git, no network.
 Usage: python3 scripts/ai_stats.py
 """
 import copy
+import html
 import json
+import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -17,6 +19,12 @@ TZ = ZoneInfo("Asia/Jakarta")
 COUNTERS = ("tools", "mcp", "skills", "models", "hours")
 WINDOW_DAYS = 90
 TOP_N = 6
+THEMES = {
+    "dark": {"bg": "#011627", "title": "#c792ea", "text": "#7fdbca", "accent": "#ffeb95", "muted": "#5f7e97"},
+    "light": {"bg": "#fffefe", "title": "#2f80ed", "text": "#434d58", "accent": "#4c71f2", "muted": "#8b949e"},
+}
+FONT = "Segoe UI, Ubuntu, Helvetica, Arial, sans-serif"
+DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 def local_day_hour(ts):
@@ -213,3 +221,130 @@ def summarize(ledger, scrub):
         "tools": public_shares(totals["tools"]),
         "heat": heat,
     }
+
+
+def svg(width, height, theme, body):
+    bg = THEMES[theme]["bg"]
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="{FONT}">'
+        f'<rect width="{width}" height="{height}" rx="6" fill="{bg}"/>{"".join(body)}</svg>\n'
+    )
+
+
+def text(x, y, value, fill, size=14, weight=400, anchor="start"):
+    return (
+        f'<text x="{x}" y="{y}" fill="{fill}" font-size="{size}" font-weight="{weight}" '
+        f'text-anchor="{anchor}">{html.escape(str(value))}</text>'
+    )
+
+
+def clip(name, limit=22):
+    return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
+def render_overview(s, theme):
+    c = THEMES[theme]
+    model, model_pct = s["models"][0] if s["models"] else ("none", 0)
+    tiles = [
+        ("Active days", f"{s['active_pct']:.0f}%"),
+        ("Longest streak", f"{s['streak']} days"),
+        ("Sessions / active day", f"{s['sessions_per_day']:.1f}"),
+        (f"Top model · {model_pct:.0f}%", clip(model.removeprefix("claude-"), 12)),
+    ]
+    body = [text(24, 36, "Claude Code · how I work with AI", c["title"], 18, 600)]
+    for i, (label, value) in enumerate(tiles):
+        x = 24 + i * 190
+        body += [text(x, 80, label, c["muted"], 12), text(x, 114, value, c["accent"], 26, 700)]
+    body.append(text(24, 150, f"last 90 days · since {s['first'][:7]} · synced {s['last']}", c["muted"], 12))
+    return svg(800, 170, theme, body)
+
+
+def render_toolbox(s, theme):
+    c = THEMES[theme]
+    groups = [("MCP servers", s["mcp"]), ("Skills", s["skills"]), ("Plugins", s["plugins"]), ("Tool mix", s["tools"])]
+    body = [text(24, 36, "Toolbox · share of calls, last 90 days", c["title"], 18, 600)]
+    for i, (title, rows) in enumerate(groups):
+        x, y = 24 + (i % 2) * 388, 72 + (i // 2) * 190
+        body.append(text(x, y, title, c["title"], 14, 600))
+        if not rows:
+            body.append(text(x, y + 24, "none yet", c["muted"], 12))
+        top = max((pct for _, pct in rows), default=1)
+        for j, (name, pct) in enumerate(rows):
+            ry = y + 24 + j * 22
+            body += [
+                text(x, ry, clip(name), c["text"], 12),
+                f'<rect x="{x + 160}" y="{ry - 9}" width="{150 * pct / top:.1f}" height="10" rx="3" fill="{c["accent"]}"/>',
+                text(x + 364, ry, f"{pct:.0f}%", c["text"], 12, anchor="end"),
+            ]
+    return svg(800, 440, theme, body)
+
+
+def render_rhythm(s, theme):
+    c = THEMES[theme]
+    top = max(max(row) for row in s["heat"]) or 1
+    body = [text(24, 36, "When I work · Asia/Jakarta, last 90 days", c["title"], 18, 600)]
+    for d, row in enumerate(s["heat"]):
+        y = 56 + d * 22
+        body.append(text(24, y + 13, DAYS[d], c["muted"], 11))
+        for h, n in enumerate(row):
+            fill, alpha = (c["accent"], 0.15 + 0.85 * n / top) if n else (c["muted"], 0.12)
+            body.append(
+                f'<rect x="{64 + h * 29}" y="{y}" width="26" height="18" rx="3" fill="{fill}" fill-opacity="{alpha:.2f}"/>'
+            )
+    for h in range(0, 24, 3):
+        body.append(text(64 + h * 29 + 13, 56 + 7 * 22 + 14, f"{h:02d}", c["muted"], 11, anchor="middle"))
+    return svg(800, 236, theme, body)
+
+
+CARDS = {"overview": render_overview, "toolbox": render_toolbox, "rhythm": render_rhythm}
+
+
+def guard(paths, deny):
+    """Return (path, term) for every denied term found, case-insensitive."""
+    hits = []
+    for path in paths:
+        content = path.read_text(encoding="utf-8").lower()
+        hits += [(path, term) for term in deny if term.lower() in content]
+    return hits
+
+
+def main(repo, home):
+    scrub_path = home / ".config/ai-stats/scrub.json"
+    ledger_path = home / ".local/share/ai-stats/ledger.json"
+    if not scrub_path.exists():
+        print(f"missing scrub config: {scrub_path}", file=sys.stderr)
+        return 1
+    scrub = json.loads(scrub_path.read_text(encoding="utf-8"))
+
+    new, skipped = collect(home / ".claude")
+    old = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    ledger = merge(old, new)
+    if not ledger:
+        print("no Claude Code data found", file=sys.stderr)
+        return 1
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(ledger, indent=1, sort_keys=True), encoding="utf-8")
+
+    s = summarize(ledger, scrub)
+    out = repo / "assets/ai"
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for theme in THEMES:
+        for name, render in CARDS.items():
+            path = out / f"{name}-{theme}.svg"
+            path.write_text(render(s, theme), encoding="utf-8")
+            written.append(path)
+
+    hits = guard(written + [repo / "README.md"], scrub.get("deny", []))
+    print(f"ledger  {s['first']} .. {s['last']} ({len(ledger)} days), skipped lines: {skipped}")
+    for key in ("mcp", "skills", "plugins", "tools", "models"):
+        print(f"{key:8}" + ", ".join(f"{name} {pct:.0f}%" for name, pct in s[key][:3]))
+    for path, term in hits:
+        print(f"DENY HIT: {term!r} in {path}", file=sys.stderr)
+    print("guard   " + ("FAIL" if hits else "ok"))
+    return 1 if hits else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(Path(__file__).resolve().parent.parent, Path.home()))

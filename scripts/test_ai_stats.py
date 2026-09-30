@@ -2,6 +2,7 @@ import json
 from collections import Counter
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -154,6 +155,67 @@ class SummaryTest(unittest.TestCase):
     def test_short_history_denominator(self):
         s = ai_stats.summarize({"2026-09-21": day(), "2026-09-30": day()}, {})
         self.assertAlmostEqual(s["active_pct"], 20.0)  # 2 active of 10 days, not of 90
+
+
+class RenderTest(unittest.TestCase):
+    def test_clip(self):
+        self.assertEqual(ai_stats.clip("short"), "short")
+        clipped = ai_stats.clip("x" * 30)
+        self.assertEqual(len(clipped), 22)
+        self.assertTrue(clipped.endswith("…"))
+
+    def test_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dirty, clean = Path(tmp, "a.svg"), Path(tmp, "b.svg")
+            dirty.write_text("<text>ACME Corp</text>")
+            clean.write_text("<text>github</text>")
+            self.assertEqual(ai_stats.guard([dirty, clean], ["acme"]), [(dirty, "acme")])
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name) / "home"
+        self.repo = Path(tmp.name) / "repo"
+        self.repo.mkdir()
+        (self.repo / "README.md").write_text("# hi\n")
+        write_jsonl(self.home / ".claude/projects/p/s1.jsonl", [
+            assistant("2026-09-29T20:01:00Z", "s1", [("mcp__acme-search__query", {}), ("Fancy&<Tool", {})]),
+        ])
+
+    def write_scrub(self, **scrub):
+        path = self.home / ".config/ai-stats/scrub.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(scrub))
+
+    def test_renders_scrubbed_valid_svgs(self):
+        self.write_scrub(strip_prefixes=["acme-"], deny=["acme"])
+        self.assertEqual(ai_stats.main(self.repo, self.home), 0)
+        svgs = sorted((self.repo / "assets/ai").glob("*.svg"))
+        self.assertEqual([p.name for p in svgs], [
+            "overview-dark.svg", "overview-light.svg", "rhythm-dark.svg",
+            "rhythm-light.svg", "toolbox-dark.svg", "toolbox-light.svg",
+        ])
+        for p in svgs:
+            ET.parse(p)  # escaped names keep the SVG well-formed
+            self.assertNotIn("acme", p.read_text().lower())
+        self.assertTrue((self.home / ".local/share/ai-stats/ledger.json").exists())
+        self.assertFalse((self.repo / "data").exists())
+
+    def test_deny_hit_fails(self):
+        self.write_scrub(deny=["acme"])
+        self.assertEqual(ai_stats.main(self.repo, self.home), 1)
+
+    def test_missing_scrub_config_fails_before_writing(self):
+        self.assertEqual(ai_stats.main(self.repo, self.home), 1)
+        self.assertFalse((self.repo / "assets").exists())
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_no_data_fails(self):
+        self.write_scrub()
+        (self.home / ".claude/projects/p/s1.jsonl").unlink()
+        self.assertEqual(ai_stats.main(self.repo, self.home), 1)
 
 
 if __name__ == "__main__":
