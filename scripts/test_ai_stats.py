@@ -1,7 +1,8 @@
 import json
+from collections import Counter
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import ai_stats
@@ -77,6 +78,82 @@ class CollectTest(unittest.TestCase):
         days, skipped = ai_stats.collect(self.claude)
         self.assertEqual(list(days), ["2026-09-30"])
         self.assertEqual(skipped, 0)
+
+
+def day(sessions=1, **counters):
+    return {"sessions": sessions, **{k: counters.get(k, {}) for k in ai_stats.COUNTERS}}
+
+
+class MergeTest(unittest.TestCase):
+    def test_merge_keeps_max_and_is_idempotent(self):
+        old = {"2026-09-01": day(3, tools={"Bash": 10}), "2026-08-01": day(1, mcp={"github": 2})}
+        # transcripts for 09-01 partly deleted: recomputed counts are lower
+        new = {"2026-09-01": day(2, tools={"Bash": 4, "Read": 1}), "2026-09-02": day(1)}
+        merged = ai_stats.merge(old, new)
+        self.assertEqual(merged["2026-09-01"]["sessions"], 3)
+        self.assertEqual(merged["2026-09-01"]["tools"], {"Bash": 10, "Read": 1})
+        self.assertIn("2026-08-01", merged)
+        self.assertIn("2026-09-02", merged)
+        self.assertEqual(ai_stats.merge(merged, new), merged)
+        self.assertEqual(old["2026-09-01"]["tools"], {"Bash": 10})  # input not mutated
+
+
+class PublicNameTest(unittest.TestCase):
+    scrub = {"strip_prefixes": ["acme-"], "rename": {"secret-report": "vuln-triage"}}
+
+    def test_public_name(self):
+        cases = {
+            "acme-opensearch": "opensearch",
+            "claude_ai_Gmail": "gmail",
+            "plugin_playwright_playwright": "playwright",
+            "acme-tools:acme-deploy": "tools:deploy",
+            "secret-report": "vuln-triage",
+            "github": "github",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(ai_stats.public_name(raw, self.scrub), expected, raw)
+
+
+class SummaryTest(unittest.TestCase):
+    def test_shares_top_and_other(self):
+        rows = ai_stats.shares(Counter({f"n{i}": i + 1 for i in range(8)}))
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows[0][0], "n7")
+        self.assertEqual(rows[-1][0], "other")
+        self.assertAlmostEqual(sum(p for _, p in rows), 100)
+        self.assertEqual(ai_stats.shares(Counter()), [])
+
+    def test_longest_streak(self):
+        self.assertEqual(ai_stats.longest_streak(["2026-09-03", "2026-09-01", "2026-09-02", "2026-09-10"]), 3)
+        self.assertEqual(ai_stats.longest_streak(["2026-09-01"]), 1)
+
+    def test_summarize_window_and_scrub(self):
+        ledger = {
+            "2026-01-01": day(1, mcp={"old": 100}, hours={"9": 5}),
+            "2026-09-01": day(2, mcp={"github": 1}),
+            "2026-09-02": day(2, mcp={"github": 1}),
+            "2026-09-03": day(2, mcp={"github": 1}),
+            "2026-09-30": day(
+                2,
+                mcp={"acme-search": 3, "plugin_playwright_playwright": 1},
+                skills={"superpowers:brainstorming": 2, "caveman:caveman": 1},
+                models={"claude-opus-5-5": 3, "claude-sonnet-5-5": 1},
+                hours={"9": 4},
+            ),
+        }
+        s = ai_stats.summarize(ledger, {"strip_prefixes": ["acme-"]})
+        self.assertEqual((s["first"], s["last"], s["streak"]), ("2026-01-01", "2026-09-30", 3))
+        self.assertAlmostEqual(s["active_pct"], 100 * 4 / 90)
+        self.assertAlmostEqual(s["sessions_per_day"], 2.0)
+        self.assertEqual({n for n, _ in s["mcp"]}, {"github", "search", "playwright"})
+        self.assertEqual(dict(s["plugins"]).keys(), {"superpowers", "caveman", "playwright"})
+        self.assertEqual(s["models"][0], ("claude-opus-5-5", 75.0))
+        self.assertEqual(sum(map(sum, s["heat"])), 4)  # 2026-01-01 is outside the window
+        self.assertEqual(s["heat"][date(2026, 9, 30).weekday()][9], 4)
+
+    def test_short_history_denominator(self):
+        s = ai_stats.summarize({"2026-09-21": day(), "2026-09-30": day()}, {})
+        self.assertAlmostEqual(s["active_pct"], 20.0)  # 2 active of 10 days, not of 90
 
 
 if __name__ == "__main__":

@@ -6,14 +6,17 @@ and writes scrubbed SVG cards to assets/ai/. No git, no network.
 
 Usage: python3 scripts/ai_stats.py
 """
+import copy
 import json
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Asia/Jakarta")
 COUNTERS = ("tools", "mcp", "skills", "models", "hours")
+WINDOW_DAYS = 90
+TOP_N = 6
 
 
 def local_day_hour(ts):
@@ -109,3 +112,104 @@ def collect(claude_dir):
         day: {"sessions": len(d["sessions"]), **{k: dict(d[k]) for k in COUNTERS}}
         for day, d in days.items()
     }, skipped
+
+
+def merge(old, new):
+    """Per-counter max: idempotent, and deleted transcripts never lower history."""
+    out = copy.deepcopy(old)
+    for day, counters in new.items():
+        cur = out.setdefault(day, {"sessions": 0})
+        cur["sessions"] = max(cur.get("sessions", 0), counters["sessions"])
+        for key in COUNTERS:
+            slot = cur.setdefault(key, {})
+            for name, n in counters[key].items():
+                slot[name] = max(slot.get(name, 0), n)
+    return out
+
+
+def public_name(raw, scrub):
+    """Normalize an MCP/skill/tool/model name and apply local scrub rules."""
+    name = raw
+    if name.startswith("claude_ai_"):
+        name = name[len("claude_ai_"):].lower()
+    elif name.startswith("plugin_"):
+        name = name.split("_", 2)[-1]
+    parts = []
+    for part in name.split(":"):
+        for prefix in scrub.get("strip_prefixes", []):
+            if part.startswith(prefix):
+                part = part[len(prefix):]
+        parts.append(part)
+    name = ":".join(parts)
+    return scrub.get("rename", {}).get(name, name)
+
+
+def shares(counter, top=TOP_N):
+    """Top names as (name, percent), the rest folded into "other"."""
+    total = sum(counter.values())
+    if not total:
+        return []
+    ranked = counter.most_common()
+    rows = [(name, 100 * n / total) for name, n in ranked[:top]]
+    rest = sum(n for _, n in ranked[top:])
+    if rest:
+        rows.append(("other", 100 * rest / total))
+    return rows
+
+
+def longest_streak(dates):
+    best = run = 0
+    prev = None
+    for d in sorted(map(date.fromisoformat, dates)):
+        run = run + 1 if prev and d - prev == timedelta(days=1) else 1
+        best = max(best, run)
+        prev = d
+    return best
+
+
+def summarize(ledger, scrub):
+    """Card numbers over the 90 days ending at the last ledger date."""
+    dates = sorted(ledger)
+    first, last = date.fromisoformat(dates[0]), date.fromisoformat(dates[-1])
+    start = last - timedelta(days=WINDOW_DAYS - 1)
+    window = [d for d in dates if date.fromisoformat(d) >= start]
+    totals = {k: Counter() for k in COUNTERS}
+    heat = [[0] * 24 for _ in range(7)]
+    sessions = 0
+    for d in window:
+        entry = ledger[d]
+        sessions += entry.get("sessions", 0)
+        for key in COUNTERS:
+            totals[key].update(entry.get(key, {}))
+        weekday = date.fromisoformat(d).weekday()
+        for hour, n in entry.get("hours", {}).items():
+            heat[weekday][int(hour)] += n
+
+    plugins = Counter()
+    for raw, n in totals["skills"].items():
+        if ":" in raw:
+            plugins[raw.split(":", 1)[0]] += n
+    for raw, n in totals["mcp"].items():
+        if raw.startswith("plugin_"):
+            plugins[raw.split("_", 2)[1]] += n
+
+    def public_shares(counter):
+        out = Counter()
+        for raw, n in counter.items():
+            out[public_name(raw, scrub)] += n
+        return shares(out)
+
+    span = min(WINDOW_DAYS, (last - first).days + 1)
+    return {
+        "first": dates[0],
+        "last": dates[-1],
+        "active_pct": 100 * len(window) / span,
+        "streak": longest_streak(dates),
+        "sessions_per_day": sessions / len(window),
+        "models": public_shares(totals["models"]),
+        "mcp": public_shares(totals["mcp"]),
+        "skills": public_shares(totals["skills"]),
+        "plugins": public_shares(plugins),
+        "tools": public_shares(totals["tools"]),
+        "heat": heat,
+    }
